@@ -1,0 +1,4 @@
+boto3
+botocore[crt]  # the login credential provider needs awscrt
+pillow
+bedrock-agentcore

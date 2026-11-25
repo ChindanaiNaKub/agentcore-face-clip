@@ -1,4 +1,6 @@
+-r agent/requirements.txt
 boto3
-botocore[crt]  # the login credential provider needs awscrt
-pillow
+botocore[crt]
 bedrock-agentcore
+pytest
+httpx

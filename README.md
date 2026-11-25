@@ -1,111 +1,176 @@
-# AgentCore face clip
+# Face insertion agent
 
-Detect faces, predict gender, crop each face, and render the crops into an MP4 clip. The agent runs as an HTTP service on Amazon Bedrock AgentCore Runtime.
+Insert a source face into a supplied target video. The agent runs as an HTTP service on Amazon Bedrock AgentCore Runtime.
 
-## Demo
+Choose one of two target modes:
 
-Open [out/deployed_faces.mp4](out/deployed_faces.mp4) to see the deployed result.
+- `all` swaps every detected face.
+- `{"face_id": "face_0001"}` swaps one tracked face.
 
-The demo uses three photos. It finds three faces, two Male and one Female. The clip is H.264, 512x512, 25 fps, and 6 seconds long.
-
-Gender is a model prediction. It can be wrong. Do not use it for sensitive decisions.
+`POST /analyze` detects faces without swapping them. It returns stable track IDs for the selected mode.
 
 ## Architecture
 
-1. Amazon Rekognition `DetectFaces` returns face boxes and gender predictions.
-2. Pillow crops each face and adds a label.
-3. ffmpeg renders the crops into an MP4 clip.
-4. FastAPI serves the pipeline over HTTP.
-5. AgentCore Runtime runs the ARM64 container.
+1. InsightFace `buffalo_l` detects faces and embeddings.
+2. Greedy cosine-similarity and bounding-box IoU matching assigns track IDs.
+3. InsightFace `inswapper_128.onnx` inserts the largest source face.
+4. Frames pass to ffmpeg through a raw-video pipe.
+5. ffmpeg writes H.264 MP4 and keeps target audio when present.
+6. FastAPI serves the pipeline. One lock serializes access to the shared CPU models.
 
-The pipeline does not call a language model. OpenRouter and Amazon Bedrock model access are not required.
+The swap model loads on the first swap request. No language model or AWS model access is required.
+
+## Model license
+
+The code is under the MIT license. The InsightFace `buffalo_l` and `inswapper_128.onnx` models are **for non-commercial research only**. The code license does not grant commercial rights to these models. Obtain the required permission before commercial use.
+
+See the [InsightFace model zoo](https://github.com/deepinsight/insightface/tree/master/model_zoo) for model details.
 
 ## Requirements
 
 - Python 3.12 or later
-- AWS credentials with `rekognition:DetectFaces`
 - ffmpeg on `PATH`
-- Docker with buildx for the container build
+- Docker with buildx for the ARM64 container build
 
-## Run locally
-
-Install the dependencies.
+## Install and download models
 
 ```bash
 python3 -m pip install -r requirements.txt
+python3 scripts/download_models.py --root ~/.cache/ncnx/insightface
+export INSIGHTFACE_ROOT=~/.cache/ncnx/insightface
 ```
 
-Set your AWS region and profile if needed.
+The downloader verifies these SHA-256 values before installing the models:
+
+- `buffalo_l.zip`: `80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f`
+- `inswapper_128.onnx`: `e4a3f08c753cb72d04e10aa0f7dbe3deebbf39567d4ead6dce08e98aa49e16af`
+
+Model binaries stay outside git. The default root is `~/.cache/ncnx/insightface`.
+
+## Command line
+
+List target face IDs:
 
 ```bash
-export AWS_REGION=ap-southeast-2
-export AWS_PROFILE=personal
+python3 scripts/face_swap.py TARGET.mp4 --analyze
 ```
 
-Run the pipeline.
+Swap all target faces:
 
 ```bash
-python3 scripts/face_clip.py testdata/*.jpg --out out/faces.mp4
+python3 scripts/face_swap.py SOURCE.jpg TARGET.mp4 --all --out out/swapped.mp4
 ```
 
-Run the HTTP agent.
+Swap one tracked face:
+
+```bash
+python3 scripts/face_swap.py SOURCE.jpg TARGET.mp4 --face-id face_0001 --out out/swapped.mp4
+```
+
+`--all` and `--face-id` are mutually exclusive. A swap requires one of them.
+
+## HTTP API
+
+Start the service:
 
 ```bash
 PYTHONPATH=scripts:agent python3 -m uvicorn main:app --app-dir agent --host 127.0.0.1 --port 8080
 ```
 
-Run the smoke test in another terminal.
+Check `GET /ping` or `GET /health`. Both return `{"status": "Healthy"}` without loading models.
+
+Analyze a target video:
+
+```json
+POST /analyze
+{"target_video": {"name": "target.mp4", "bytes_b64": "..."}}
+```
+
+The response contains `faces`. Each face has `face_id`, `first_frame`, `last_frame`, `frames`, and its latest `bbox` as `[left, top, right, bottom]`.
+
+Insert a face:
+
+```json
+POST /invocations
+{
+  "source_face": {"name": "source.jpg", "bytes_b64": "..."},
+  "target_video": {"name": "target.mp4", "bytes_b64": "..."},
+  "target_faces": "all"
+}
+```
+
+Set `target_faces` to `{"face_id": "face_0001"}` to swap one track. The response contains `faces`, the `swapped_faces` count, and `clip_b64` as a base64 MP4.
+
+The API ignores client filenames and uses fixed temporary filenames. Source images are limited to 8 MiB. Target videos are limited to 50 MiB, 20 seconds, 150 frames, and 1280 pixels on the longest side.
+
+Track IDs are deterministic. Detections sort by left edge. New IDs follow first-appearance order. Later detections match tracks by embedding cosine similarity plus bounding-box IoU.
+
+## Verify locally
+
+Run the focused tests:
+
+```bash
+python3 -m pytest -q
+```
+
+Run the optional real-model test:
+
+```bash
+RUN_REAL_MODEL_TESTS=1 INSIGHTFACE_ROOT=~/.cache/ncnx/insightface python3 -m pytest -q tests/test_real_models.py
+```
+
+Start the API, then run the smoke test in another terminal:
 
 ```bash
 python3 agent/smoke_test.py
 ```
 
-The request shape is a JSON object with an `images` list. Each item has a `name` and a base64 encoded `bytes_b64` value. The response contains `faces`, `counts`, and `clip_b64`.
+The smoke test creates a temporary two-face video. It checks analyze, all-face swap, and selected-face swap. It saves `out/smoke_all.mp4` and `out/smoke_one.mp4`. Pass a target path to test another video.
 
 ## Build the container
 
 AgentCore Runtime requires ARM64.
 
 ```bash
-docker buildx build --platform linux/arm64 --load -f agent/Dockerfile -t face-clip-agent:test .
+docker buildx build --platform linux/arm64 --load -f agent/Dockerfile -t face-insert-agent:test .
 ```
 
-Test the health endpoint.
+Run the health check:
 
 ```bash
-docker run --rm --platform linux/arm64 -p 127.0.0.1:8080:8080 face-clip-agent:test
+docker run --rm --platform linux/arm64 -p 127.0.0.1:8080:8080 face-insert-agent:test
 ```
 
 Call `http://127.0.0.1:8080/ping` from another terminal.
 
+The image downloads and verifies the models at build time. Models are stored at `/opt/insightface/models` and are readable by the non-root runtime user.
+
 ## Deploy to AgentCore Runtime
 
 1. Push the ARM64 image to a private ECR repository.
-2. Create an execution role with ECR pull, CloudWatch Logs, and Rekognition permissions.
+2. Create an execution role with ECR pull and CloudWatch Logs permissions.
 3. Create an HTTP Runtime on port 8080 with `/invocations` as the request path.
 4. Create a Runtime endpoint and wait for `READY`.
 5. Invoke the endpoint with the script below.
 
-Use IAM SigV4 for inbound authentication. Use VPC mode before production use.
+Use IAM SigV4 for inbound authentication. Use VPC mode before production use. Confirm model license rights before any commercial deployment.
 
 ## Invoke a deployed Runtime
 
+Swap all faces:
+
 ```bash
-python3 scripts/invoke_deployed.py <runtime-arn> --region ap-southeast-2 --endpoint production
+python3 scripts/invoke_deployed.py <runtime-arn> testdata/franklin.jpg TARGET.mp4 --all --region ap-southeast-2 --endpoint production
 ```
 
-Add `--profile <profile>` if the credentials use a named AWS profile. The script sends the three test photos, checks the face counts, and saves `out/deployed_faces.mp4`.
+Swap one face:
 
-## Verification
+```bash
+python3 scripts/invoke_deployed.py <runtime-arn> testdata/franklin.jpg TARGET.mp4 --face-id face_0001 --region ap-southeast-2 --endpoint production
+```
 
-The deployed Runtime returned HTTP 200. CloudWatch logs showed ffmpeg running on ARM64. CloudWatch metrics in `AWS/Bedrock-AgentCore` recorded invocations, sessions, and zero errors.
-
-The console can lag behind a new call. Check the Runtime logs and metrics if the Agents card still shows no activity.
+Add `--profile <profile>` for a named AWS profile. The script saves `out/deployed_swapped.mp4` by default. Use `--out` to change the path.
 
 ## Test data
 
-See [testdata/README.md](testdata/README.md) for sources and licenses.
-
-## License
-
-The code is under the MIT license. See [LICENSE](LICENSE). The test images keep their own licenses.
+See [testdata/README.md](testdata/README.md) for image sources and licenses. Face insertion can create misleading media. Use it only with consent and follow applicable law.

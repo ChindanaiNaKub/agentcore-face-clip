@@ -6,5 +6,6 @@ __pycache__/
 !.env.example
 .DS_Store
 *.log
+models/
 out/frames/
-out/faces.mp4
+out/*.mp4

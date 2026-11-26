@@ -160,6 +160,47 @@ def test_analyze_and_swap_two_face_synthetic_video(tmp_path):
     assert region_change(original, one_frame, (195, 45, 265, 115)) < 5
 
 
+def test_compare_writes_side_by_side_clip_with_boxes_and_gender(tmp_path):
+    class GenderFace(tuple):
+        def __new__(cls, bbox, sex):
+            face = super().__new__(cls, bbox)
+            face.bbox = bbox
+            face.sex = sex
+            return face
+
+    class GenderDetector:
+        def __call__(self, frame):
+            del frame
+            detections = [
+                FaceDetection((20.0, 30.0, 100.0, 130.0), (1.0, 0.0)),
+                FaceDetection((180.0, 30.0, 280.0, 130.0), (0.0, 1.0)),
+            ]
+            return detections, [
+                GenderFace(detections[0].bbox, "M"),
+                GenderFace(detections[1].bbox, "F"),
+            ]
+
+    target = tmp_path / "target.mp4"
+    output = tmp_path / "compare.mp4"
+    make_video(target)
+    result = swap_video(target, output, TargetFaces(), GenderDetector(), FillSwapper(), compare=True)
+    assert result.swapped_faces == 20
+
+    frame = first_frame(output)
+    assert frame.shape[:2] == (160, 640)  # two 320px frames side by side
+
+    def color_pixels(color, y1, y2, x1, x2):
+        region = frame[y1:y2, x1:x2]
+        return int(np.all(region == np.array(color, dtype=np.uint8), axis=-1).sum())
+
+    # left side: red id+gender label bars above each face (exact-pixel count is
+    # low because h264 smears the bar edges; presence is what we assert)
+    assert color_pixels((0, 0, 255), 12, 30, 20, 130) > 10
+    assert color_pixels((0, 0, 255), 12, 30, 180, 290) > 10
+    # right side: green "swapped" label bars
+    assert color_pixels((0, 255, 0), 12, 30, 340, 640) > 10
+
+
 def test_swap_preserves_target_audio_and_writes_h264(tmp_path):
     import subprocess
 
@@ -226,8 +267,8 @@ def test_analyze_reports_no_target_face(tmp_path):
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"frames": 21, "fps": 1}, "exceeds 20 seconds"),
-        ({"frames": 151, "fps": 30}, "exceeds 150 frames"),
+        ({"frames": 21, "fps": 30}, "exceeds 20 frames"),
+        ({"frames": 20, "fps": 0.5}, "exceeds 20 seconds"),
         ({"frames": 1, "size": (1282, 32)}, "exceeds 1280 pixels"),
     ],
 )

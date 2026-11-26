@@ -11,7 +11,7 @@ class FakeEngine:
     def analyze(self, target: Path):
         return ({"face_id": "face_0001"},)
 
-    def swap(self, source: Path, target: Path, selection: TargetFaces, output: Path):
+    def swap(self, source: Path, target: Path, selection: TargetFaces, output: Path, compare: bool = False):
         output.write_bytes(b"clip")
         return SwapResult(({"face_id": "face_0001"},), 1)
 

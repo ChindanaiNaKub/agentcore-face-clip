@@ -16,6 +16,7 @@ class FakeEngine:
         self.source_name = None
         self.target_name = None
         self.selection = None
+        self.compare = None
 
     def analyze(self, target: Path):
         self.analyze_calls += 1
@@ -25,11 +26,12 @@ class FakeEngine:
             {"face_id": "face_0002", "first_frame": 0, "last_frame": 1, "frames": 2, "bbox": [2, 0, 3, 1]},
         )
 
-    def swap(self, source: Path, target: Path, selection: TargetFaces, output: Path):
+    def swap(self, source: Path, target: Path, selection: TargetFaces, output: Path, compare: bool = False):
         self.swap_calls += 1
         self.source_name = source.name
         self.target_name = target.name
         self.selection = selection
+        self.compare = compare
         output.write_bytes(b"fake mp4")
         return SwapResult(
             faces=({"face_id": "face_0001"}, {"face_id": "face_0002"}),
@@ -88,6 +90,22 @@ def test_invocations_returns_faces_count_and_clip(selection):
     assert engine.selection == (
         TargetFaces() if selection == "all" else TargetFaces(False, "face_0001")
     )
+
+
+def test_invocations_compare_flag_reaches_engine_and_non_boolean_is_rejected():
+    engine = FakeEngine()
+    with TestClient(create_app(engine)) as client:
+        response = client.post(
+            "/invocations", json={**payload("all"), "compare": True}
+        )
+    assert response.status_code == 200
+    assert engine.compare is True
+
+    engine = FakeEngine()
+    with TestClient(create_app(engine)) as client:
+        response = client.post("/invocations", json={**payload("all"), "compare": "yes"})
+    assert response.status_code == 400
+    assert engine.swap_calls == 0
 
 
 @pytest.mark.parametrize(

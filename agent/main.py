@@ -70,8 +70,11 @@ def create_app(engine: InsightFaceEngine | None = None) -> FastAPI:
 
     @app.post("/invocations")
     def invoke(req: dict):
-        if set(req) != {"source_face", "target_video", "target_faces"}:
-            return error("invocations accepts only source_face, target_video, and target_faces")
+        if set(req) - {"source_face", "target_video", "target_faces", "compare"}:
+            return error("invocations accepts only source_face, target_video, target_faces, and compare")
+        compare = req.get("compare", False)
+        if not isinstance(compare, bool):
+            return error("compare must be a boolean")
         try:
             selection = parse_target_faces(req["target_faces"])
             source_bytes = parse_upload(req["source_face"], "source_face", MAX_SOURCE_BYTES)
@@ -83,7 +86,7 @@ def create_app(engine: InsightFaceEngine | None = None) -> FastAPI:
                 output = directory / "swapped.mp4"
                 source.write_bytes(source_bytes)
                 target.write_bytes(target_bytes)
-                result = app.state.engine.swap(source, target, selection, output)
+                result = app.state.engine.swap(source, target, selection, output, compare=compare)
                 clip = base64.b64encode(output.read_bytes()).decode("ascii")
             return {
                 "faces": [dict(face) for face in result.faces],

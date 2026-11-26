@@ -4,6 +4,7 @@ Usage:
     python3 scripts/face_swap.py TARGET.mp4 --analyze
     python3 scripts/face_swap.py SOURCE.jpg TARGET.mp4 --all --out out/swapped.mp4
     python3 scripts/face_swap.py SOURCE.jpg TARGET.mp4 --face-id face_0001 --out out/swapped.mp4
+    python3 scripts/face_swap.py SOURCE.jpg TARGET.mp4 --all --compare --out out/compare.mp4
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ import numpy as np
 
 MAX_TARGET_BYTES = 50 * 1024 * 1024
 MAX_TARGET_SECONDS = 20.0
-MAX_TARGET_FRAMES = 150
+MAX_TARGET_FRAMES = 20
 MAX_TARGET_PIXELS = 1280
 MIN_COSINE = 0.5
 MIN_IOU = 0.2
@@ -250,6 +251,47 @@ def _check_frame(frame: np.ndarray, info: VideoInfo, frame_index: int) -> None:
 Detector = Callable[[np.ndarray], tuple[list[FaceDetection], list[object]]]
 Swapper = Callable[[np.ndarray, object], np.ndarray]
 
+LABEL_FACE_ID_COLOR = (0, 0, 255)
+LABEL_SWAPPED_COLOR = (0, 255, 0)
+
+
+def _gender(model_face: object) -> str:
+    sex = getattr(model_face, "sex", "")
+    return {"M": "M", "F": "F"}.get(str(sex).upper(), "")
+
+
+def _annotate(frame: np.ndarray, labels: Sequence[tuple[BBox, str, tuple]], shift: int) -> np.ndarray:
+    """Draw one box plus label per face; shift moves the box to a stacked copy."""
+    for (x1, y1, x2, y2), text, color in labels:
+        left, top, right, bottom = (int(value) for value in (x1 + shift, y1, x2 + shift, y2))
+        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+        if text:
+            cv2.rectangle(frame, (left, top - 18), (left + 10 * len(text), top), color, -1)
+            cv2.putText(frame, text, (left + 2, top - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+    return frame
+
+
+def _frame_labels(
+    assignments: Sequence[str], detections: Sequence[FaceDetection], model_faces: Sequence[object]
+) -> list[tuple[BBox, str, tuple]]:
+    labels = []
+    for face_id, detection, model_face in zip(assignments, detections, model_faces):
+        gender = _gender(model_face)
+        text = f"{face_id} {gender}".strip()
+        labels.append((detection.bbox, text, LABEL_FACE_ID_COLOR))
+    return labels
+
+
+def _marked_labels(labels: list[tuple[BBox, str, tuple]], selection: TargetFaces) -> list[tuple[BBox, str, tuple]]:
+    """Labels for the swapped side: swapped faces get a green 'swapped' tag."""
+    return [
+        (bbox, f"{text} swapped", LABEL_SWAPPED_COLOR)
+        if selection.all_faces or text.startswith(selection.face_id or "\0")
+        else item
+        for item in labels
+        for bbox, text in [(item[0], item[1])]
+    ]
+
 
 def analyze_video(target: Path, detector: Detector) -> tuple[dict, ...]:
     capture, info = _open_video(target)
@@ -298,13 +340,15 @@ def swap_video(
     selection: TargetFaces,
     detector: Detector,
     swapper: Swapper,
+    compare: bool = False,
 ) -> SwapResult:
     capture, info = _open_video(target)
     tracker = FaceTracker()
     swapped_faces = 0
     process: subprocess.Popen | None = None
+    write_info = VideoInfo(info.width * 2, info.height, info.fps) if compare else info
     try:
-        process = _start_ffmpeg(target, output, info)
+        process = _start_ffmpeg(target, output, write_info)
         frame_index = 0
         while True:
             ok, frame = capture.read()
@@ -313,10 +357,17 @@ def swap_video(
             _check_frame(frame, info, frame_index)
             detections, model_faces = detector(frame)
             assignments, _ = tracker.update(detections, frame_index)
+            labels = _frame_labels(assignments, detections, model_faces)
+            if compare:
+                original = frame.copy()
             for face_id, model_face in zip(assignments, model_faces):
                 if selection.all_faces or face_id == selection.face_id:
                     frame = swapper(frame, model_face)
                     swapped_faces += 1
+            if compare:
+                frame = np.hstack([original, frame])
+                _annotate(frame, labels, 0)
+                _annotate(frame, _marked_labels(labels, selection), info.width)
             try:
                 process.stdin.write(frame.tobytes())
             except OSError as exc:
@@ -359,6 +410,12 @@ def _default_model_root() -> Path:
     return Path(configured).expanduser() if configured else Path.home() / ".cache" / "ncnx" / "insightface"
 
 
+def _providers() -> list[str]:
+    """NCNX_ONNX_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider for GPU runtimes."""
+    configured = os.environ.get("NCNX_ONNX_PROVIDERS")
+    return configured.split(",") if configured else ["CPUExecutionProvider"]
+
+
 class InsightFaceEngine:
     """Lazy CPU model adapter shared by all requests."""
 
@@ -381,7 +438,7 @@ class InsightFaceEngine:
             from insightface.app import FaceAnalysis
 
             self._detector = FaceAnalysis(
-                name="buffalo_l", root=str(self.root), providers=["CPUExecutionProvider"]
+                name="buffalo_l", root=str(self.root), providers=_providers()
             )
             self._detector.prepare(ctx_id=0, det_size=(640, 640))
         except Exception as exc:
@@ -401,7 +458,7 @@ class InsightFaceEngine:
             import insightface
 
             self._swapper = insightface.model_zoo.get_model(
-                str(model_path), providers=["CPUExecutionProvider"]
+                str(model_path), providers=_providers()
             )
         except Exception as exc:
             raise FaceSwapError(f"could not load inswapper_128.onnx: {exc}") from exc
@@ -438,7 +495,7 @@ class InsightFaceEngine:
             return analyze_video(target, self._detect)
 
     def swap(
-        self, source: Path, target: Path, selection: TargetFaces, output: Path
+        self, source: Path, target: Path, selection: TargetFaces, output: Path, compare: bool = False
     ) -> SwapResult:
         if output.resolve() in {source.resolve(), target.resolve()}:
             raise FaceSwapError("output path must differ from the source and target paths")
@@ -451,6 +508,7 @@ class InsightFaceEngine:
                 selection,
                 self._detect,
                 lambda frame, face: swap_model.get(frame, face, source_face, paste_back=True),
+                compare=compare,
             )
 
 
@@ -462,6 +520,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     modes.add_argument("--all", action="store_true")
     modes.add_argument("--face-id")
     parser.add_argument("--out", type=Path, default=Path("out/swapped.mp4"))
+    parser.add_argument("--compare", action="store_true", help="side-by-side original and swap with face boxes")
     args = parser.parse_args(argv)
 
     try:
@@ -475,7 +534,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parser.error("a swap requires SOURCE.jpg TARGET.mp4 and --all or --face-id")
             selection = TargetFaces() if args.all else parse_target_faces({"face_id": args.face_id})
             args.out.parent.mkdir(parents=True, exist_ok=True)
-            swapped = engine.swap(args.files[0], args.files[1], selection, args.out)
+            swapped = engine.swap(args.files[0], args.files[1], selection, args.out, compare=args.compare)
             result = {
                 "faces": list(swapped.faces),
                 "swapped_faces": swapped.swapped_faces,

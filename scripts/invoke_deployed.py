@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--all", action="store_true")
     modes.add_argument("--face-id")
+    parser.add_argument("--compare", action="store_true", help="request the side-by-side review clip")
     parser.add_argument("--profile", default=None)
     parser.add_argument("--region", default="ap-southeast-2")
     parser.add_argument("--endpoint", default="production")
@@ -46,10 +47,12 @@ def main(argv: list[str] | None = None) -> int:
             },
             "target_faces": "all" if args.all else {"face_id": args.face_id},
         }
+        if args.compare:
+            payload["compare"] = True
         session = boto3.Session(profile_name=args.profile, region_name=args.region)
         client = session.client(
             "bedrock-agentcore",
-            config=Config(retries={"total_max_attempts": 5, "mode": "adaptive"}, read_timeout=300),
+            config=Config(retries={"total_max_attempts": 5, "mode": "adaptive"}, read_timeout=900),
         )
         response = client.invoke_agent_runtime(
             agentRuntimeArn=args.runtime_arn,

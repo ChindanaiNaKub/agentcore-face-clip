@@ -69,6 +69,12 @@ python3 scripts/face_swap.py SOURCE.jpg TARGET.mp4 --face-id face_0001 --out out
 
 `--all` and `--face-id` are mutually exclusive. A swap requires one of them.
 
+Produce a review clip: original and swap side by side, each face boxed with its ID and gender, swapped faces tagged in green:
+
+```bash
+python3 scripts/face_swap.py SOURCE.jpg TARGET.mp4 --all --compare --out out/compare.mp4
+```
+
 ## HTTP API
 
 Start the service:
@@ -99,9 +105,9 @@ POST /invocations
 }
 ```
 
-Set `target_faces` to `{"face_id": "face_0001"}` to swap one track. The response contains `faces`, the `swapped_faces` count, and `clip_b64` as a base64 MP4.
+Set `target_faces` to `{"face_id": "face_0001"}` to swap one track. Add `"compare": true` for a review clip: original and swap side by side with face boxes, IDs, gender labels, and green tags on swapped faces. The response contains `faces`, the `swapped_faces` count, and `clip_b64` as a base64 MP4.
 
-The API ignores client filenames and uses fixed temporary filenames. Source images are limited to 8 MiB. Target videos are limited to 50 MiB, 20 seconds, 150 frames, and 1280 pixels on the longest side.
+The API ignores client filenames and uses fixed temporary filenames. Source images are limited to 8 MiB. Target videos are limited to 50 MiB, 20 seconds, 20 frames, and 1280 pixels on the longest side. The frame cap keeps AgentCore CPU runs under the synchronous timeout.
 
 Track IDs are deterministic. Detections sort by left edge. New IDs follow first-appearance order. Later detections match tracks by embedding cosine similarity plus bounding-box IoU.
 
@@ -154,6 +160,8 @@ The image downloads and verifies the models at build time. Models are stored at 
 5. Invoke the endpoint with the script below.
 
 Use IAM SigV4 for inbound authentication. Use VPC mode before production use. Confirm model license rights before any commercial deployment.
+
+For a GPU runtime, build the image for `linux/amd64` with `onnxruntime-gpu` and set `NCNX_ONNX_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider` in the runtime environment. On CPU runtimes, leave it unset.
 
 ## Invoke a deployed Runtime
 

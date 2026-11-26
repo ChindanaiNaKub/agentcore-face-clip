@@ -171,6 +171,30 @@ python3 scripts/invoke_deployed.py <runtime-arn> testdata/franklin.jpg TARGET.mp
 
 Add `--profile <profile>` for a named AWS profile. The script saves `out/deployed_swapped.mp4` by default. Use `--out` to change the path.
 
+## Demo results
+
+Tested on 2026-11-26 with a CC BY 3.0 *Tears of Steel* excerpt and public-domain Grace Hopper and Alan Turing portraits.
+
+| Run | Target | Tracks | Face swaps per source | Result |
+| --- | --- | --- | --- | --- |
+| Local | 6 seconds, 960×400, 144 frames | 2 | 288 | H.264/AAC MP4 |
+| AgentCore | 2 seconds, 640×266, 48 frames | 3 | 96 | H.264/AAC MP4 |
+
+AgentCore Runtime V2 used HTTP, ARM64, and `ap-southeast-2`. The endpoint reached `READY`. The first invocation took 571.75 seconds. The second took 332.16 seconds. The three-track AgentCore result shows one target identity split during motion.
+
+Validation finished with `48 passed, 1 skipped`. The real-model test also passed.
+
+## Limitations
+
+- The InsightFace models are for non-commercial research only. The MIT code license does not grant commercial model rights.
+- Processing uses CPU models and one lock. Requests are serialized. Long clips can exceed the AgentCore 15-minute synchronous timeout.
+- Tracking uses cosine similarity and bounding-box overlap. Occlusion, fast motion, and large pose changes can split or merge identities. Track IDs apply only to one video.
+- Only the largest face in the source image is used. Output quality varies with resolution, lighting, pose, and occlusion.
+- The API loads full base64 requests and responses into memory. Input caps limit size, but large clips remain slow.
+- The demo uses AgentCore `PUBLIC` network mode. The image also has known critical and high dependency findings. Patch, rescan, and use VPC mode before production.
+- Face insertion can create misleading media. Obtain consent and follow applicable law. Source and target media licenses still apply.
+- AgentCore, ECR, KMS, and CloudWatch Logs can incur charges while resources remain active.
+
 ## Test data
 
 See [testdata/README.md](testdata/README.md) for image sources and licenses. Face insertion can create misleading media. Use it only with consent and follow applicable law.
